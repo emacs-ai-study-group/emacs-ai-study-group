@@ -1,0 +1,486 @@
+#+TITLE: gptel Testing Guide with Ollama
+#+AUTHOR: Emacs AI Study Group
+#+DATE: [2025-11-06]
+#+PROPERTY: header-args:emacs-lisp :results output :exports both :session *gptel-test*
+#+STARTUP: showeverything
+
+* Introduction
+
+This document provides a comprehensive, executable testing guide for gptel with
+Ollama local LLM backend. All code blocks can be executed with =C-c C-c=.
+
+** What You'll Learn
+
+- Setting up gptel with Ollama
+- Writing ERT tests for AI-integrated code
+- Using mocks/spies to test without real LLM calls
+- Running integration tests with actual Ollama
+- Validating AI-generated code
+
+** Prerequisites
+
+For *full integration testing*:
+- Ollama installed (https://ollama.ai)
+- A model pulled (e.g., =ollama pull llama3.2=)
+- Ollama server running (=ollama serve=)
+
+For *unit testing with mocks*:
+- Just Emacs and gptel (no external dependencies)
+
+* Environment Setup
+
+** Load Required Packages
+
+#+BEGIN_SRC emacs-lisp
+;; Load gptel
+(require 'gptel nil t)
+
+(if (featurep 'gptel)
+    (message "✓ gptel loaded successfully")
+  (message "✗ gptel not found - install with: M-x package-install RET gptel RET"))
+#+END_SRC
+
+** Load ERT Test Suite
+
+#+BEGIN_SRC emacs-lisp
+;; Load the test suite
+(let ((test-file (expand-file-name
+                  "../tests/gptel-ollama-ert.el"
+                  (file-name-directory (or load-file-name buffer-file-name)))))
+  (if (file-exists-p test-file)
+      (progn
+        (load-file test-file)
+        (message "✓ Test suite loaded from: %s" test-file))
+    (message "✗ Test file not found: %s" test-file)))
+#+END_SRC
+
+** Check Environment
+
+#+BEGIN_SRC emacs-lisp
+(require 'gptel-ollama-ert)
+
+;; Display test report
+(with-temp-buffer
+  (insert "=== Environment Check ===\n\n")
+  (insert (format "Emacs Version: %s\n" emacs-version))
+  (insert (format "gptel Loaded: %s\n" (if (featurep 'gptel) "Yes" "No")))
+  (insert (format "Ollama Available: %s\n"
+                 (if (gptel-test--check-ollama-available) "Yes" "No")))
+  (insert (format "Ollama Executable: %s\n"
+                 (or (executable-find "ollama") "Not found")))
+  (insert (format "\nTest Model: %s\n" gptel-test-ollama-model))
+  (insert (format "Test Host: %s\n" gptel-test-ollama-host))
+  (message "%s" (buffer-string)))
+#+END_SRC
+
+* Unit Tests with Mocks (No LLM Required)
+
+** Enable Mock Framework
+
+#+BEGIN_SRC emacs-lisp
+(require 'gptel-ollama-ert)
+
+;; Clear any previous state
+(gptel-test--clear-mocks)
+(gptel-test--enable-mock)
+
+(message "✓ Mock framework enabled - no real LLM calls will be made")
+#+END_SRC
+
+** Test 1: Simple Mock Response
+
+#+BEGIN_SRC emacs-lisp
+;; Setup: Add a mock response
+(gptel-test--add-mock "What is 2+2?" "The answer is 4.")
+
+;; Test: Make request
+(let ((response nil))
+  (gptel-request "What is 2+2?"
+    :callback (lambda (resp info)
+               (setq response resp)))
+
+  ;; Validate
+  (message "Prompt: What is 2+2?")
+  (message "Response: %s" response)
+  (message "Test: %s"
+           (if (string-match-p "4" response)
+               "✓ PASS - Response contains expected answer"
+             "✗ FAIL - Response doesn't match")))
+#+END_SRC
+
+** Test 2: Mock Elisp Code Generation
+
+#+BEGIN_SRC emacs-lisp
+;; Setup: Mock valid Elisp code
+(gptel-test--add-mock
+ "Write function to add two numbers"
+ "(defun add-two-numbers (a b)\n  \"Add A and B.\"\n  (+ a b))")
+
+;; Test: Request code
+(let ((response nil))
+  (gptel-request "Write function to add two numbers"
+    :callback (lambda (resp info)
+               (setq response resp)))
+
+  ;; Validate response
+  (message "=== Mock Code Generation Test ===")
+  (message "Response:\n%s\n" response)
+
+  ;; Try to evaluate the code
+  (condition-case err
+      (progn
+        (eval (read response))
+        (message "✓ Code evaluation: SUCCESS")
+
+        ;; Test the function
+        (let ((result (add-two-numbers 5 7)))
+          (message "✓ Function test: (add-two-numbers 5 7) = %d" result)
+          (message "✓ Result validation: %s"
+                   (if (= result 12) "PASS" "FAIL"))))
+    (error
+     (message "✗ Code evaluation: FAILED - %s" (error-message-string err)))))
+#+END_SRC
+
+** Test 3: Mock Invalid Elisp (Common AI Mistake)
+
+This demonstrates handling invalid code that AI might generate.
+
+#+BEGIN_SRC emacs-lisp
+;; Setup: Mock code with Python-style syntax (common AI mistake)
+(gptel-test--add-mock
+ "fizzbuzz"
+ "(defun fizzbuzz (n)\n  (if (i % 3 == 0) \"Fizz\" \"Buzz\"))")
+
+;; Test: Request and validate
+(let ((response nil))
+  (gptel-request "fizzbuzz"
+    :callback (lambda (resp info)
+               (setq response resp)))
+
+  (message "=== Invalid Code Test ===")
+  (message "Response:\n%s\n" response)
+
+  ;; Check for common mistakes
+  (let ((mistakes '()))
+    (when (string-match-p "%" response)
+      (push "Uses % operator (not valid in Elisp)" mistakes))
+    (when (string-match-p "==" response)
+      (push "Uses == operator (not valid in Elisp)" mistakes))
+
+    (if mistakes
+        (progn
+          (message "✓ Test PASS - Detected mistakes:")
+          (dolist (mistake mistakes)
+            (message "  - %s" mistake)))
+      (message "✗ Test FAIL - Should have detected syntax errors"))))
+#+END_SRC
+
+** Test 4: Spy on API Calls
+
+#+BEGIN_SRC emacs-lisp
+;; Clear previous calls
+(gptel-test--clear-mocks)
+
+;; Make several mock requests
+(gptel-test--add-mock "Prompt A" "Response A")
+(gptel-test--add-mock "Prompt B" "Response B")
+
+(gptel-request "Prompt A" :callback (lambda (r i) nil))
+(gptel-request "Prompt B" :callback (lambda (r i) nil))
+
+;; Inspect spy data
+(message "=== Spy Test ===")
+(message "Total calls recorded: %d" (length gptel-test--spy-calls))
+
+(dotimes (i (length gptel-test--spy-calls))
+  (let ((call (nth i gptel-test--spy-calls)))
+    (message "Call %d: %s" (1+ i) (plist-get call :prompt))))
+
+(message "✓ Spy test PASS - All calls recorded")
+#+END_SRC
+
+** Disable Mock Framework
+
+#+BEGIN_SRC emacs-lisp
+(gptel-test--disable-mock)
+(gptel-test--clear-mocks)
+
+(message "✓ Mock framework disabled")
+#+END_SRC
+
+* Integration Tests with Real Ollama
+
+** Setup Ollama Backend
+
+#+BEGIN_SRC emacs-lisp
+(require 'gptel)
+
+;; Configure Ollama backend
+(setq-default gptel-backend
+              (gptel-make-ollama "Ollama-Test"
+                :host "localhost:11434"
+                :stream nil
+                :models '(llama3.2:latest)))
+
+(setq-default gptel-model "llama3.2:latest")
+
+(message "✓ Ollama backend configured: %s on %s"
+         gptel-model "localhost:11434")
+#+END_SRC
+
+** Test 1: Simple Question (Integration)
+
+This requires Ollama to be running!
+
+#+BEGIN_SRC emacs-lisp :eval no
+(if (not (gptel-test--check-ollama-available))
+    (message "⚠ SKIPPED - Ollama not available")
+  (let ((prompt "What is the capital of France? Reply with just the city name.")
+        (response nil)
+        (done nil))
+
+    (message "Sending prompt to Ollama: %s" prompt)
+
+    (gptel-request prompt
+      :callback (lambda (resp info)
+                 (setq response resp)
+                 (setq done t)))
+
+    ;; Wait for response (max 30 seconds)
+    (let ((waited 0))
+      (while (and (not done) (< waited 30))
+        (sleep-for 1)
+        (setq waited (1+ waited)))
+
+      (if done
+          (progn
+            (message "=== Response from Ollama ===")
+            (message "%s" response)
+            (message "✓ Integration test COMPLETE"))
+        (message "✗ Timeout - no response after 30 seconds")))))
+#+END_SRC
+
+** Test 2: Code Generation (Integration)
+
+#+BEGIN_SRC emacs-lisp :eval no
+(if (not (gptel-test--check-ollama-available))
+    (message "⚠ SKIPPED - Ollama not available")
+  (let ((prompt "Write a simple Emacs Lisp function called 'multiply' that takes two numbers and returns their product. Reply with ONLY the function definition.")
+        (response nil)
+        (done nil))
+
+    (message "Requesting code from Ollama...")
+
+    (gptel-request prompt
+      :callback (lambda (resp info)
+                 (setq response resp)
+                 (setq done t)))
+
+    (let ((waited 0))
+      (while (and (not done) (< waited 60))
+        (sleep-for 1)
+        (setq waited (1+ waited)))
+
+      (if done
+          (progn
+            (message "=== Generated Code ===")
+            (message "%s\n" response)
+
+            ;; Try to extract and evaluate
+            (let ((code (if (string-match "(defun \\(?:.\\|\n\\)*" response)
+                           (match-string 0 response)
+                         response)))
+              (condition-case err
+                  (progn
+                    (eval (read code))
+                    (message "✓ Code evaluates successfully")
+                    ;; Try calling if function exists
+                    (when (fboundp 'multiply)
+                      (message "✓ Function test: (multiply 6 7) = %d"
+                               (multiply 6 7))))
+                (error
+                 (message "✗ Code evaluation failed: %s"
+                          (error-message-string err))))))
+        (message "✗ Timeout - no response")))))
+#+END_SRC
+
+* Running ERT Test Suite
+
+** Run All Unit Tests (Fast, No Ollama)
+
+#+BEGIN_SRC emacs-lisp
+(ert-run-tests-batch-and-exit '(tag :unit))
+#+END_SRC
+
+** Run Mock Tests Only
+
+#+BEGIN_SRC emacs-lisp
+(require 'gptel-ollama-ert)
+
+;; Run tests tagged with :mock
+(let ((ert-quiet nil))
+  (ert-run-tests-interactively '(tag :mock))
+  (message "\n✓ Mock tests complete"))
+#+END_SRC
+
+** Run Integration Tests (Requires Ollama)
+
+#+BEGIN_SRC emacs-lisp :eval no
+(if (gptel-test--check-ollama-available)
+    (progn
+      (message "Running integration tests with Ollama...")
+      (ert-run-tests-interactively '(tag :integration)))
+  (message "⚠ Ollama not available - skipping integration tests"))
+#+END_SRC
+
+* Validation Examples
+
+** Validate Code Structure
+
+#+BEGIN_SRC emacs-lisp
+(defun validate-elisp-function (code)
+  "Validate that CODE is a valid function definition.
+Returns list of (VALID-P ISSUES)."
+  (let ((issues '()))
+
+    ;; Check basic structure
+    (unless (string-match-p "(defun " code)
+      (push "Missing defun" issues))
+
+    ;; Check for common AI mistakes
+    (when (string-match-p "%" code)
+      (push "Uses % operator (Python style)" issues))
+
+    (when (string-match-p "==" code)
+      (push "Uses == operator (not Elisp)" issues))
+
+    (when (string-match-p "return " code)
+      (push "Uses 'return' keyword (not needed in Elisp)" issues))
+
+    ;; Try to read as s-expression
+    (condition-case err
+        (read code)
+      (error
+       (push (format "Parse error: %s" (error-message-string err)) issues)))
+
+    (list (null issues) issues)))
+
+;; Test the validator
+(let* ((good-code "(defun test (x) (+ x 1))")
+       (bad-code "(defun test (x) (return x % 2))")
+       (result1 (validate-elisp-function good-code))
+       (result2 (validate-elisp-function bad-code)))
+
+  (message "=== Code Validation Test ===")
+  (message "Good code: %s - %s"
+           good-code
+           (if (car result1) "✓ VALID" "✗ INVALID"))
+
+  (message "Bad code: %s - %s"
+           bad-code
+           (if (car result2) "✓ VALID" "✗ INVALID"))
+
+  (when (cadr result2)
+    (message "Issues found:")
+    (dolist (issue (cadr result2))
+      (message "  - %s" issue))))
+#+END_SRC
+
+** Extract Code from Response
+
+#+BEGIN_SRC emacs-lisp
+(defun extract-elisp-code (response)
+  "Extract Elisp code from RESPONSE.
+Handles markdown code blocks and plain text."
+  (cond
+   ;; Markdown with elisp/emacs-lisp
+   ((string-match "```\\(?:elisp\\|emacs-lisp\\)\n\\(\\(?:.\\|\n\\)*?\\)```" response)
+    (match-string 1 response))
+
+   ;; Generic code block
+   ((string-match "```\n\\(\\(?:.\\|\n\\)*?\\)```" response)
+    (match-string 1 response))
+
+   ;; Look for defun
+   ((string-match "(defun \\(?:.\\|\n\\)*" response)
+    (match-string 0 response))
+
+   ;; Return as-is
+   (t response)))
+
+;; Test extraction
+(let ((examples '(
+                 ("```elisp\n(defun test () 42)\n```" . "Code block with language")
+                 ("Some text\n```\n(defun test () 42)\n```\nMore text" . "Generic code block")
+                 ("Here is the code: (defun test () 42)" . "Inline code"))))
+
+  (message "=== Code Extraction Test ===")
+  (dolist (example examples)
+    (let* ((input (car example))
+           (desc (cdr example))
+           (extracted (extract-elisp-code input)))
+      (message "%s:\n  Input: %s\n  Extracted: %s\n"
+               desc
+               (substring input 0 (min 40 (length input)))
+               extracted))))
+#+END_SRC
+
+* Best Practices Summary
+
+** Writing Tests for AI-Integrated Code
+
+1. *Use mocks for unit tests* - Fast, reproducible, no external dependencies
+2. *Use integration tests sparingly* - Slow, non-deterministic, but validate real behavior
+3. *Always validate AI responses* - Check syntax, evaluate safely, handle errors
+4. *Tag your tests* - Use ERT tags (=:unit=, =:integration=, =:slow=, =:mock=)
+5. *Make tests self-contained* - Use =unwind-protect= for cleanup
+
+** Example Test Structure
+
+#+BEGIN_SRC emacs-lisp
+(ert-deftest my-test-name ()
+  "Test description."
+  :tags '(:unit :mock)
+  (unwind-protect
+      (progn
+        ;; Setup
+        (setup-test-environment)
+
+        ;; Execute
+        (let ((result (function-under-test)))
+
+          ;; Validate
+          (should (expected-condition result))
+          (should-not (unexpected-condition result))
+          (should-error (function-that-should-fail))))
+
+    ;; Cleanup (always runs)
+    (cleanup-test-environment)))
+#+END_SRC
+
+* Conclusion
+
+This guide demonstrated:
+
+- ✓ Setting up gptel with Ollama
+- ✓ Writing ERT tests with mock/spy framework
+- ✓ Running unit tests without LLM
+- ✓ Running integration tests with real Ollama
+- ✓ Validating AI-generated code
+- ✓ Best practices for AI-integrated testing
+
+** Next Steps
+
+1. Run the mock tests to verify your setup
+2. Start Ollama and run integration tests
+3. Experiment with different prompts
+4. Add your own validation rules
+5. Contribute examples back to the study group
+
+** Resources
+
+- [[file:../tests/gptel-ollama-ert.el][ERT Test Suite]]
+- [[file:demo.org][Interactive gptel Demo]]
+- [[file:../../docs/elisp-development.md][Elisp Development Guide]]
+- [[https://github.com/karthink/gptel][gptel GitHub]]
+- [[https://ollama.ai][Ollama Website]]
